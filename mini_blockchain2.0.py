@@ -2,7 +2,7 @@
 #Big Ideas
 #---------
 
-#phase 1 : blocks and hashing
+#phase 1: blocks and hashing
 # Big Idea: Blockchains create security through the fact that each block references the hash of the previous block, forming an immutable chain. If one block is altered, its hash changes, breaking the chain and signaling tampering.
 # This ensures data integrity and trustworthiness in decentralized systems.
 # applications: cryptocurrencies, supply chain management, secure voting systems, digital identity verification, and decentralized finance (DeFi).
@@ -17,6 +17,8 @@
 #install ecdsa
 #ecdsa is a library for elliptic curve cryptography, used here for creating and verifying digital signatures.
 
+#phase 3: Add mining making it expensive to create blocks through trial and error hashing while cheap to varify 
+
 import hashlib
 #gives SHA-256 hashing which means it creates a 32 byte fingerprint of the input data with a 256 bit output 
 #used for creating unique identifiers for blocks in the blockchain 
@@ -24,6 +26,7 @@ import hashlib
 import json
 import binascii
 from dataclasses import dataclass, asdict
+from operator import index
 from time import time
 from typing import List, Any, Optional
 
@@ -51,10 +54,11 @@ class Block:
     timestamp: float
     transactions: List[Any]
     previous_hash: str
+    nonce: int 
     hash: str
 #creates a data container class 
 #frozen=True makes the instances of the class immutable, meaning once an instance is created, its fields cannot be modified.
-
+#nonce is included for future proofing for mining implementation
 
 
 # ----------------------------
@@ -110,7 +114,7 @@ def verify_transaction(tx: Transaction) -> bool:
 # ----------------------------
 
 # a function to compute the SHA-256 hash of a block
-def compute_hash(index: int, timestamp: float, transactions: List[Any], previous_hash: str) -> str:
+def compute_hash(index: int, timestamp: float, transactions: List[Any], previous_hash: str, nonce: int) -> str:
     # Convert Transaction objects to JSON-safe dicts for hashing
     txs_normalized = []
     for t in transactions:
@@ -130,6 +134,7 @@ def compute_hash(index: int, timestamp: float, transactions: List[Any], previous
         "timestamp": timestamp,
         "transactions": txs_normalized,
         "previous_hash": previous_hash,
+        "nonce": nonce,
     }
     #builds the data we want in the fingerprint
 
@@ -137,12 +142,20 @@ def compute_hash(index: int, timestamp: float, transactions: List[Any], previous
     #ensures consistent ordering of keys for hashing
     return hashlib.sha256(block_string).hexdigest()
     #returns the SHA-256 hash of the block data
+    #by including nonce we prepare for future mining implementation 
+    #nonce is a number that miners change to find a hash that meets certain criteria (like a number of leading zeros)
+    #this makes it computationally expensive to create blocks while easy to verify them
+    #nonce must affect the hash, otherwise “mining” wouldn’t do anything.
 
 
 class Blockchain:
-    def __init__(self) -> None:
-        self.chain: List[Block] = []
-        self.create_genesis_block()
+    def __init__(self, difficulty: int = 4, mining_reward: int = 50) -> None:
+            self.chain: List[Block] = []
+            self.difficulty = difficulty
+            self.mining_reward = mining_reward
+            self.create_genesis_block()
+    # this defines the difficulty to mine blocks
+    #Difficulty 4 means “hash starts with 4 zeros” — fast enough to test.
     # a block chain is a list of blocks
     #genisis block is the first block in the chain
     #creates the genesis block and appends it to the chain
@@ -152,13 +165,15 @@ class Blockchain:
         timestamp = time()
         transactions = ["GENESIS"]
         previous_hash = "0" * 64
-        block_hash = compute_hash(index, timestamp, transactions, previous_hash)
+        nonce = 0 #nonce for genesis block
+        block_hash = compute_hash(index, timestamp, transactions, previous_hash, nonce)
 
         genesis = Block(
             index=index,
             timestamp=timestamp,
             transactions=transactions,
             previous_hash=previous_hash,
+            nonce=nonce, #Added p3
             hash=block_hash,
         )
         self.chain.append(genesis)
@@ -178,36 +193,54 @@ class Blockchain:
         return balance
     #calculates the balance for a given address by iterating through all transactions in the blockchain; adds amounts for received transactions and subtracts for sent transactions
 
+    def is_proof_valid(self, block_hash: str) -> bool:
+        return block_hash.startswith("0" * self.difficulty)
 
-    #Rejects fake signatures: Rejects fake signatures; Rejects overspending; Enforces ownership
-    def add_block(self, transactions: List[Any]) -> Block:
-        # Validate transactions before adding
-        for tx in transactions:
+    def mine_block(self, transactions: List[Any], miner_address: str) -> Block:
+    # Add coinbase reward to miner
+        reward_tx = Transaction(
+            sender=SYSTEM_SENDER,
+            recipient=miner_address,
+            amount=self.mining_reward
+        )
+        full_txs = [reward_tx] + transactions
+    # Validate transactions (except SYSTEM minting)
+        for tx in full_txs:
             if isinstance(tx, Transaction):
                 if not verify_transaction(tx):
                     raise ValueError("Invalid transaction signature")
-
                 if tx.sender != SYSTEM_SENDER and self.get_balance(tx.sender) < tx.amount:
                     raise ValueError("Insufficient balance")
-
         last = self.last_block()
         index = last.index + 1
         timestamp = time()
         previous_hash = last.hash
-        block_hash = compute_hash(index, timestamp, transactions, previous_hash)
 
+        # Proof of Work loop
+        nonce = 0
+        while True:
+            block_hash = compute_hash(index, timestamp, full_txs, previous_hash, nonce)
+            if self.is_proof_valid(block_hash):
+                break
+            nonce += 1
         new_block = Block(
             index=index,
             timestamp=timestamp,
-            transactions=transactions,
+            transactions=full_txs,
             previous_hash=previous_hash,
+            nonce=nonce,
             hash=block_hash,
         )
         self.chain.append(new_block)
         return new_block
-    #Grab the last block; New block index = last index + 1; Previous hash = last block’s hash; Compute hash from this block’s data; Append it; Return it (useful for printing/debugging).
-    # #validates the integrity of the blockchain
+    #Miner always gets a reward transaction first
+    #Then we repeatedly try nonces until hash meets target
+    #When it matches, we append that block
 
+    #Rejects fake signatures: Rejects fake signatures; Rejects overspending; Enforces ownership
+    #Grab the last block; New block index = last index + 1; Previous hash = last block’s hash; Compute hash from this block’s data; Append it; Return it (useful for printing/debugging).
+    #validates the integrity of the blockchain
+    #add block is no longer necessarey anymore because mining now adds blocks with proof of work and reward transactions
 
     def is_valid(self) -> bool:
         for i in range(1, len(self.chain)):
@@ -224,11 +257,21 @@ class Blockchain:
                 current.timestamp,
                 current.transactions,
                 current.previous_hash,
+                current.nonce,
             )
             if current.hash != expected_hash:
                 return False
 
+            # NEW: proof-of-work target must be met for non-genesis blocks
+            if i != 0 and not self.is_proof_valid(current.hash):
+                return False
+
         return True
+    
+
+
+
+
 #iterates through the chain starting from the second block; checks if each block's previous_hash matches the hash of the previous block; recomputes the hash of each block and compares it to the stored hash; returns True if all blocks are valid, otherwise False.
 
 
@@ -253,19 +296,26 @@ def print_chain(bc: Blockchain) -> None:
 # ----------------------------
 
 if __name__ == "__main__":
-    bc = Blockchain()
+    bc = Blockchain(difficulty=4, mining_reward=50)
 
+    miner = Wallet()
     alice = Wallet()
     bob = Wallet()
 
-    # Fund Alice from SYSTEM
-    bc.add_block([Transaction(sender=SYSTEM_SENDER, recipient=alice.address(), amount=100)])
+    # Mine first block: gives miner 50
+    bc.mine_block([], miner.address())
 
-    # Alice -> Bob
-    tx1 = Transaction(sender=alice.address(), recipient=bob.address(), amount=30)
-    sign_transaction(tx1, alice)
-    bc.add_block([tx1])
+    # Miner sends Alice 20 (must be signed)
+    tx1 = Transaction(sender=miner.address(), recipient=alice.address(), amount=20)
+    sign_transaction(tx1, miner)
+    bc.mine_block([tx1], miner.address())  # miner also earns +50 again
 
+    # Alice sends Bob 5
+    tx2 = Transaction(sender=alice.address(), recipient=bob.address(), amount=5)
+    sign_transaction(tx2, alice)
+    bc.mine_block([tx2], miner.address())
+
+    print("Miner balance:", bc.get_balance(miner.address()))
     print("Alice balance:", bc.get_balance(alice.address()))
     print("Bob balance:", bc.get_balance(bob.address()))
     print("Blockchain valid?", bc.is_valid())
