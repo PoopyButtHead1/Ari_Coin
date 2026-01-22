@@ -60,6 +60,13 @@
     #verified (hash + PoW + transactions)
     #appended or rejected
 
+#Phase 7: Transaction Fees and Miner selection 
+#without fees miners dont care which transactions to include
+#the mempool could grow infinitley
+#spam is free
+# with fees transactions compete for block space 
+#miners prioitize higher fee transactions 
+
 
 #---------
 #to be discussed later:
@@ -93,6 +100,7 @@ class Transaction:
     sender: str
     recipient: str
     amount: int
+    fee: int = 0 #add fee
     signature: Optional[bytes] = None
 #defines a transaction structure with sender, recipient, amount, and an optional signature
 
@@ -129,9 +137,9 @@ class Wallet:
 
 def transaction_bytes(tx: Transaction) -> bytes:
     # Deterministic encoding (simple version)
-    return f"{tx.sender}|{tx.recipient}|{tx.amount}".encode()
+    return f"{tx.sender}|{tx.recipient}|{tx.amount}|{tx.fee}".encode()
 #makes a transaction signable by converting its data to bytes
-
+#if fee isnt signed someone could raise it without sellers consent 
 
 def sign_transaction(tx: Transaction, wallet: Wallet) -> None:
     tx.signature = wallet.sign(transaction_bytes(tx))
@@ -235,7 +243,7 @@ class Blockchain:
             for tx in block.transactions:
                 if isinstance(tx, Transaction):
                     if tx.sender == address:
-                        balance -= tx.amount
+                        balance -= (tx.amount + tx.fee) #fee comes out of sellers balance
                     if tx.recipient == address:
                         balance += tx.amount
         return balance
@@ -245,20 +253,34 @@ class Blockchain:
         return block_hash.startswith("0" * self.difficulty)
 
     def mine_block(self, transactions: List[Any], miner_address: str) -> Block:
+    
+    #compute total fees
+        total_fees = 0
+        for tx in transactions:
+            if isinstance(tx, Transaction):
+                total_fees += tx.fee
+
     # Add coinbase reward to miner
         reward_tx = Transaction(
             sender=SYSTEM_SENDER,
             recipient=miner_address,
-            amount=self.mining_reward
+            amount=self.mining_reward + total_fees,
+            fee=0,
+            signature=None,
         )
+
+        #Coinbase first
         full_txs = [reward_tx] + transactions
+
     # Validate transactions (except SYSTEM minting)
         for tx in full_txs:
             if isinstance(tx, Transaction):
                 if not verify_transaction(tx):
                     raise ValueError("Invalid transaction signature")
-                if tx.sender != SYSTEM_SENDER and self.get_balance(tx.sender) < tx.amount:
+                cost = tx.amount + tx.fee
+                if tx.sender != SYSTEM_SENDER and self.get_balance(tx.sender) < cost: #sellers can no longer ovoid fees 
                     raise ValueError("Insufficient balance")
+
         last = self.last_block()
         index = last.index + 1
         timestamp = time()
@@ -340,8 +362,14 @@ class Blockchain:
 
 
 
+
+#---------------
+# Networking / Nodes
+#---------------
+
 #each node has its own blockchain and can connect to other nodes as peers
-class Node:
+MAX_TX_PER_BLOCK = 2 #block size limit
+class Node:   
     def __init__(self, name: str, difficulty: int = 4):
         self.name = name
         self.blockchain = Blockchain(difficulty=difficulty)
@@ -372,16 +400,26 @@ class Node:
 #tries attatching orphan blocks to the chain if their previous hash matches the last block's hash; continues until no more orphans can be attached
 
     def receive_transaction(self, tx: Transaction) -> None:
-        if verify_transaction(tx):
-            self.mempool.append(tx)
-            self.broadcast_transaction(tx)
-            print(f"{self.name} accepted transaction")
-        else:
+        # 1) Signature check
+        if not verify_transaction(tx):
             print(f"{self.name} rejected invalid transaction")
-        if tx.sender != SYSTEM_SENDER and self.blockchain.get_balance(tx.sender) < tx.amount:
-            print(f"{self.name} rejected: insufficient funds (mempool policy)")
-        return
+            return
 
+        # 2) Funds check (mempool policy) — Phase 7 includes fees
+        if tx.sender != SYSTEM_SENDER:
+            cost = tx.amount + tx.fee
+            if self.blockchain.get_balance(tx.sender) < cost:
+                print(f"{self.name} rejected: insufficient funds (mempool policy)")
+                return
+    
+        # 3) Dedup (optional but very helpful)
+        if tx in self.mempool:
+            return
+
+        # 4) Accept + gossip
+        self.mempool.append(tx)
+        print(f"{self.name} accepted transaction")
+        self.broadcast_transaction(tx)
 #method to receive and validate transactions; if valid, adds to mempool and broadcasts to peers
 
     def broadcast_transaction(self, tx: Transaction) -> None:
@@ -396,10 +434,15 @@ class Node:
             print(f"{self.name}: no transactions to mine")
             return
 
-        block = self.blockchain.mine_block(self.mempool, miner_address)
-        self.mempool.clear()
+        txs = sorted(self.mempool, key=lambda t: t.fee, reverse=True)
+        selected = txs[:MAX_TX_PER_BLOCK]
+        block = self.blockchain.mine_block(selected, miner_address)
+
+        # remove only the selected txs from mempool
+        self.mempool = [tx for tx in self.mempool if tx not in selected]
         self.broadcast_block(block)
-        print(f"{self.name} mined block {block.index}")
+        print(f"{self.name} mined block {block.index} with {len(selected)} txs")
+        #now minors prioritze fees, and block space scarcity exists 
 #method to mine a new block using transactions from the mempool; clears the mempool after mining and broadcasts the new block to peers
 
     def broadcast_block(self, block: Block) -> None:
@@ -445,6 +488,10 @@ class Node:
 
 
 
+# ----------------------------
+# Utility functions
+# ----------------------------
+
 #prints the blockchain in a readable format
 def print_chain(bc: Blockchain) -> None:
     for block in bc.chain:
@@ -485,11 +532,82 @@ def print_chain(bc: Blockchain) -> None:
         print(json.dumps(printable, indent=2))
 
 
+
+
 # ----------------------------
 # Demo
 #function to demonstrate wallets and signed transactions
 # ----------------------------
 
+if __name__ == "__main__":
+    node_a = Node("Node A", difficulty=3)
+    node_b = Node("Node B", difficulty=3)
+    node_a.connect_peer(node_b)
+    node_b.connect_peer(node_a)
+
+    miner = Wallet()
+    alice = Wallet()
+    bob = Wallet()
+    charlie = Wallet()
+
+    # Fund miner (mine empty block)
+    node_a.blockchain.mine_block([], miner.address())
+    node_b.sync_with_peers()
+
+    # Miner -> Alice (give Alice spendable funds)
+    tx_fund = Transaction(sender=miner.address(), recipient=alice.address(), amount=49, fee=1)
+    sign_transaction(tx_fund, miner)
+    node_a.receive_transaction(tx_fund)
+    node_a.mine(miner.address())
+    node_b.sync_with_peers()
+
+    # Alice creates 3 txs with different fees (but block limit is 2)
+    tx_low = Transaction(sender=alice.address(), recipient=bob.address(), amount=5, fee=1)
+    sign_transaction(tx_low, alice)
+
+    tx_mid = Transaction(sender=alice.address(), recipient=charlie.address(), amount=5, fee=3)
+    sign_transaction(tx_mid, alice)
+
+    tx_high = Transaction(sender=alice.address(), recipient=bob.address(), amount=5, fee=10)
+    sign_transaction(tx_high, alice)
+
+    # Broadcast all three
+    node_b.receive_transaction(tx_low)
+    node_b.receive_transaction(tx_mid)
+    node_b.receive_transaction(tx_high)
+
+    print("Node A mempool:", len(node_a.mempool))
+    print("Node B mempool:", len(node_b.mempool))
+
+    # Mine one block (should pick fee=10 and fee=3 if MAX_TX_PER_BLOCK=2)
+    node_a.mine(miner.address())
+    node_b.sync_with_peers()
+
+    print("\nBalances (Node A view):")
+    print("Miner:", node_a.blockchain.get_balance(miner.address()))
+    print("Alice:", node_a.blockchain.get_balance(alice.address()))
+    print("Bob:", node_a.blockchain.get_balance(bob.address()))
+    print("Charlie:", node_a.blockchain.get_balance(charlie.address()))
+    print("Valid?", node_a.blockchain.is_valid())
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+"""
 if __name__ == "__main__":
     # -------------------------
     # SETUP
@@ -611,7 +729,7 @@ if __name__ == "__main__":
     print("Node C chain length:", len(node_c.blockchain.chain))
 
 
-"""
+
 === STEP 1: Initial sync (Phase 4 behavior) ===
 
 === STEP 2: Node A mines a reward block (miner gets coins) ===
