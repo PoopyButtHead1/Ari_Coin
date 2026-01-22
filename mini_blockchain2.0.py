@@ -210,7 +210,7 @@ class Blockchain:
 
     def create_genesis_block(self) -> None:
         index = 0
-        timestamp = time()
+        timestamp = 0.0 #fixed timestamp for genesis block so that the hash stays the same making it possible for the nodes to attach blocks 
         transactions = ["GENESIS"]
         previous_hash = "0" * 64
         nonce = 0 #nonce for genesis block
@@ -491,47 +491,170 @@ def print_chain(bc: Blockchain) -> None:
 # ----------------------------
 
 if __name__ == "__main__":
+    # -------------------------
+    # SETUP
+    # -------------------------
     node_a = Node("Node A", difficulty=3)
     node_b = Node("Node B", difficulty=3)
 
+    # Connect peers so transactions gossip
     node_a.connect_peer(node_b)
     node_b.connect_peer(node_a)
 
-    miner = Wallet()
+    miner_a = Wallet()
+    miner_b = Wallet()
     alice = Wallet()
     bob = Wallet()
 
-    # 1) Fund miner on Node A, sync Node B
-    node_a.blockchain.mine_block([], miner.address())
-    node_b.sync_with_peers()
+    print("\n=== STEP 1: Initial sync (Phase 4 behavior) ===")
+    node_b.sync_with_peers()  # optional: makes sure both start aligned
 
-    # 2) Miner -> Alice (broadcast + mine it first)
-    tx1 = Transaction(sender=miner.address(), recipient=alice.address(), amount=20)
-    sign_transaction(tx1, miner)
+    # -------------------------
+    # STEP 2: Give Miner A funds by mining on A
+    # -------------------------
+    print("\n=== STEP 2: Node A mines a reward block (miner gets coins) ===")
+    block1_a = node_a.blockchain.mine_block([], miner_a.address())
+    print("Node A mined:", block1_a.index, "hash:", block1_a.hash[:12])
+
+    # IMPORTANT: Don't auto-broadcast blocks yet; we will deliver them manually.
+    # To prevent automatic block broadcast from other methods, we just won't call node_a.mine() here.
+
+    # Manually deliver block1 to B (normal in-order delivery)
+    node_b.receive_block(block1_a)
+
+    # -------------------------
+    # STEP 3: Transaction gossip (mempool)
+    # -------------------------
+    print("\n=== STEP 3: Transaction gossip (Miner A -> Alice 20) ===")
+    tx1 = Transaction(sender=miner_a.address(), recipient=alice.address(), amount=20)
+    sign_transaction(tx1, miner_a)
+
+    # Send tx to Node A; it should gossip to Node B
     node_a.receive_transaction(tx1)
 
-    # Mine block containing tx1
-    node_a.mine(miner.address())
+    print("Node A mempool size:", len(node_a.mempool))
+    print("Node B mempool size:", len(node_b.mempool))
 
-    # Make sure Node B sees the new block (your broadcast_block should do this,
-    # but syncing is a safe learning-step)
+    # -------------------------
+    # STEP 4: Mine a block on A that includes tx1
+    # (We mine directly using Blockchain.mine_block to avoid auto-broadcast.)
+    # -------------------------
+    print("\n=== STEP 4: Node A mines a block including the mempool tx ===")
+    block2_a = node_a.blockchain.mine_block(node_a.mempool, miner_a.address())
+    node_a.mempool.clear()
+    print("Node A mined:", block2_a.index, "hash:", block2_a.hash[:12])
+
+    # -------------------------
+    # STEP 5: ORPHAN DEMO (deliver out of order)
+    # Deliver block2 BEFORE block1's successor is known on Node B.
+    # We'll simulate this by resetting Node B to only genesis for a moment.
+    # -------------------------
+    print("\n=== STEP 5: Orphan block demo (deliver child before parent) ===")
+
+    # Create a fresh Node C to show orphan behavior clearly (only genesis block)
+    node_c = Node("Node C", difficulty=3)
+
+    # Deliver block2 first (Node C doesn't have its parent hash)
+    node_c.receive_block(block2_a)
+
+    # Now deliver block1 (parent); Node C should accept it and then attach orphan
+    node_c.receive_block(block1_a)
+
+    print("Node C chain length:", len(node_c.blockchain.chain))
+    print("Node C orphans stored:", len(getattr(node_c, "orphans", {})))
+
+    # -------------------------
+    # STEP 6: FORK DEMO (two nodes mine different blocks at same height)
+    # Make Node B mine its own competing block at the same height as Node A's block2.
+    # -------------------------
+    print("\n=== STEP 6: Fork demo (Node B mines a competing block) ===")
+
+    # At this moment, Node B has block1_a. It also has tx1 in mempool.
+    # We'll let Node B mine a different block (maybe empty or with tx) to create a fork.
+    # Mine directly to avoid auto-broadcast.
+    block2_b = node_b.blockchain.mine_block(node_b.mempool, miner_b.address())
+    node_b.mempool.clear()
+    print("Node B mined competing:", block2_b.index, "hash:", block2_b.hash[:12])
+
+    # Now Node B receives Node A's block2 (which conflicts with its own block2)
+    node_b.receive_block(block2_a)
+
+    # With your current logic, Node B may say "detected fork, syncing" here.
+    # That’s okay—this demonstrates fork detection and recovery.
+
+    # -------------------------
+    # STEP 7: CONVERGENCE DEMO (Node A extends its chain, making it "stronger")
+    # -------------------------
+    print("\n=== STEP 7: Convergence demo (Node A mines one more block, then B syncs) ===")
+    block3_a = node_a.blockchain.mine_block([], miner_a.address())
+    print("Node A mined:", block3_a.index, "hash:", block3_a.hash[:12])
+
+    # Deliver the new tip block to B
+    node_b.receive_block(block3_a)
+
+    # Force sync to show adoption of best chain if needed
     node_b.sync_with_peers()
 
-    # 3) Alice -> Bob (now Alice actually has funds on-chain)
-    tx2 = Transaction(sender=alice.address(), recipient=bob.address(), amount=5)
-    sign_transaction(tx2, alice)
-    node_b.receive_transaction(tx2)
-
-    # Mine block containing tx2
-    node_a.mine(miner.address())
-    node_b.sync_with_peers()
-
-    print("\nFinal balances (Node A view):")
-    print("Miner:", node_a.blockchain.get_balance(miner.address()))
+    # -------------------------
+    # FINAL STATE
+    # -------------------------
+    print("\n=== FINAL BALANCES (Node A view) ===")
+    print("Miner A:", node_a.blockchain.get_balance(miner_a.address()))
+    print("Miner B:", node_a.blockchain.get_balance(miner_b.address()))
     print("Alice:", node_a.blockchain.get_balance(alice.address()))
     print("Bob:", node_a.blockchain.get_balance(bob.address()))
-    print("Blockchain valid?", node_a.blockchain.is_valid())
+    print("Blockchain valid (A)?", node_a.blockchain.is_valid())
+
+    print("\n=== FINAL CHAIN LENGTHS ===")
+    print("Node A chain length:", len(node_a.blockchain.chain))
+    print("Node B chain length:", len(node_b.blockchain.chain))
+    print("Node C chain length:", len(node_c.blockchain.chain))
 
 
-    
+"""
+=== STEP 1: Initial sync (Phase 4 behavior) ===
 
+=== STEP 2: Node A mines a reward block (miner gets coins) ===
+Node A mined: 1 hash: 0005a3d20255
+Node B accepted block 1
+
+Node A mined the first PoW block (block 1).
+Node B had the same genesis, so the parent hash matched its tip → it appended the block normally.
+
+=== STEP 3: Transaction gossip (Miner A -> Alice 20) ===
+Node B accepted transaction
+Node A accepted transaction
+Node A mempool size: 1
+Node B mempool size: 1
+
+=== STEP 4: Node A mines a block including the mempool tx ===
+Node A mined: 2 hash: 000004f974f5
+
+=== STEP 5: Orphan block demo (deliver child before parent) ===
+Node C stored orphan block 2
+Node C accepted block 1
+Node C attached orphan block 2
+Node C chain length: 3
+Node C orphans stored: 0
+
+=== STEP 6: Fork demo (Node B mines a competing block) ===
+Node B mined competing: 2 hash: 0000efef134c
+Node B detected fork, syncing
+
+=== STEP 7: Convergence demo (Node A mines one more block, then B syncs) ===
+Node A mined: 3 hash: 000e6f9c929e
+Node B stored orphan block 3
+Node B adopted Node A's chain
+
+=== FINAL BALANCES (Node A view) ===
+Miner A: 130
+Miner B: 0
+Alice: 20
+Bob: 0
+Blockchain valid (A)? True
+
+=== FINAL CHAIN LENGTHS ===
+Node A chain length: 4
+Node B chain length: 4
+Node C chain length: 3
+"""
