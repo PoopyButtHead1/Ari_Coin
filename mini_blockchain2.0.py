@@ -39,6 +39,15 @@
 #rebroadcasting/gossip: after accepting the transaction or block, nodes rebroadcast it to their peers to ensure network-wide propagation
 #networking: nodes communicate over a peer-to-peer network to share blockchain data and updates
 
+#Phase 6: Orphan Blocks and "try again later"
+#when a node receives a block that references a previous block it doesn't have yet, it stores the orphan block temporarily
+#once the missing previous block is received, the node can then validate and add the orphan block to its blockchain
+#this ensures that blocks are not lost and the blockchain remains consistent across all nodes
+#nodes may request missing blocks from their peers to complete their blockchain
+#once the missing blocks are obtained, the node can validate and add the orphan blocks to its chain
+#this mechanism helps maintain the integrity and continuity of the blockchain across the network
+#before if a block arrived and it didnt attach we detected a fork and synced with peers
+
 #important to know:
 #Transaction broadcast
     #are signed by wallets
@@ -338,11 +347,29 @@ class Node:
         self.blockchain = Blockchain(difficulty=difficulty)
         self.peers: list["Node"] = []
         self.mempool: list[Transaction] = []
+        self.orphans: dict[str, Block] = {}
+        #orphan block is just a valid block without a parent yet 
 #initializes a node with a name, its own blockchain, and an empty list of peers
     
     def connect_peer(self, peer: "Node") -> None:
         self.peers.append(peer)
 #method to connect another node as a peer
+
+    def try_attach_orphans(self) -> None:
+        attached = True
+
+        while attached:
+            attached = False
+            last_hash = self.blockchain.last_block().hash
+
+            for orphan_hash, orphan in list(self.orphans.items()):
+                if orphan.previous_hash == last_hash:
+                    self.blockchain.chain.append(orphan)
+                    del self.orphans[orphan_hash]
+                    print(f"{self.name} attached orphan block {orphan.index}")
+                    attached = True
+                    break
+#tries attatching orphan blocks to the chain if their previous hash matches the last block's hash; continues until no more orphans can be attached
 
     def receive_transaction(self, tx: Transaction) -> None:
         if verify_transaction(tx):
@@ -383,16 +410,26 @@ class Node:
     def receive_block(self, block: Block) -> None:
         last = self.blockchain.last_block()
 
-        # Normal case: extends our chain
+        # Case 1: normal extension
         if block.previous_hash == last.hash:
             self.blockchain.chain.append(block)
             self.mempool = [
                 tx for tx in self.mempool if tx not in block.transactions
             ]
             print(f"{self.name} accepted block {block.index}")
+
+            # After attaching, try to attach any waiting orphans
+            self.try_attach_orphans()
             return
 
-        # Otherwise: possible fork → sync
+        # Case 2: parent missing → orphan
+        known_hashes = {b.hash for b in self.blockchain.chain}
+        if block.previous_hash not in known_hashes:
+            self.orphans[block.hash] = block
+            print(f"{self.name} stored orphan block {block.index}")
+            return
+        
+        # Case 3: parent exists but not the tip → fork
         print(f"{self.name} detected fork, syncing")
         self.sync_with_peers()
 #method to receive a new block; if it extends the current chain, appends it and removes included transactions from the mempool; if it creates a fork, initiates synchronization with peers
@@ -401,6 +438,7 @@ class Node:
         for peer in self.peers:
             replaced = self.blockchain.replace_chain_if_better(peer.blockchain.chain)
             if replaced:
+                self.orphans.clear()
                 print(f"{self.name} adopted {peer.name}'s chain")
 #peer synchronization method to adopt the longest valid chain from connected peers
 
