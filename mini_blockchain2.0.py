@@ -29,9 +29,33 @@
 #consensus: nodes agree on the state of the blockchain using consensus algorithms (e.g., Proof of Work, Proof of Stake) The longest valid chain is accepted as the true chain!
 #forks: occur when there are conflicting versions of the blockchain, leading to temporary splits until consensus is reached
 
-#Phase 5: security considerations
-#attacks: various threats to blockchain security, such as 51% attacks, double spending, and Sybil attacks
+#Phase 5: Networking, mempool, transaction propagation, and block propagation
+#blocks dont just appear magically on every node they are built from transactions that users create and broadcast to the network
+#transaction braodcasting: when a user creates a transaction, it is broadcasted to all nodes in the network
+#mempool: each node maintains a mempool (memory pool) of unconfirmed transactions waiting
+#block propagation: when a miner successfully mines a new block, it is broadcasted to all nodes for validation and addition to their local blockchain copy
+#orphan handling: nodes may receive blocks that reference unknown previous blocks (orphans); these are stored temporarily until the missing blocks are received
+#right now, if it doesnt attatch -> sync with peers to get the longest chain this isnt propper but it works for learning
+#rebroadcasting/gossip: after accepting the transaction or block, nodes rebroadcast it to their peers to ensure network-wide propagation
 #networking: nodes communicate over a peer-to-peer network to share blockchain data and updates
+
+#important to know:
+#Transaction broadcast
+    #are signed by wallets
+    #broadcast to peers
+    #independently verified
+    #stored in mempools
+#Block broadcast
+    #are mined locally
+    #broadcast to peers
+    #verified (hash + PoW + transactions)
+    #appended or rejected
+
+
+#---------
+#to be discussed later:
+# security considerations
+#attacks: various threats to blockchain security, such as 51% attacks, double spending, and Sybil attacks
 #---------
 
 import hashlib
@@ -305,15 +329,74 @@ class Blockchain:
     
 #iterates through the chain starting from the second block; checks if each block's previous_hash matches the hash of the previous block; recomputes the hash of each block and compares it to the stored hash; returns True if all blocks are valid, otherwise False.
 
+
+
+#each node has its own blockchain and can connect to other nodes as peers
 class Node:
     def __init__(self, name: str, difficulty: int = 4):
         self.name = name
         self.blockchain = Blockchain(difficulty=difficulty)
         self.peers: list["Node"] = []
+        self.mempool: list[Transaction] = []
 #initializes a node with a name, its own blockchain, and an empty list of peers
+    
     def connect_peer(self, peer: "Node") -> None:
         self.peers.append(peer)
 #method to connect another node as a peer
+
+    def receive_transaction(self, tx: Transaction) -> None:
+        if verify_transaction(tx):
+            self.mempool.append(tx)
+            self.broadcast_transaction(tx)
+            print(f"{self.name} accepted transaction")
+        else:
+            print(f"{self.name} rejected invalid transaction")
+        if tx.sender != SYSTEM_SENDER and self.blockchain.get_balance(tx.sender) < tx.amount:
+            print(f"{self.name} rejected: insufficient funds (mempool policy)")
+        return
+
+#method to receive and validate transactions; if valid, adds to mempool and broadcasts to peers
+
+    def broadcast_transaction(self, tx: Transaction) -> None:
+        for peer in self.peers:
+            if tx not in peer.mempool:
+                peer.receive_transaction(tx)
+#method to broadcast a transaction to all connected peers
+#now models gossip style propagation by checking if the peer already has the transaction in its mempool before sending it
+
+    def mine(self, miner_address: str) -> None:
+        if not self.mempool:
+            print(f"{self.name}: no transactions to mine")
+            return
+
+        block = self.blockchain.mine_block(self.mempool, miner_address)
+        self.mempool.clear()
+        self.broadcast_block(block)
+        print(f"{self.name} mined block {block.index}")
+#method to mine a new block using transactions from the mempool; clears the mempool after mining and broadcasts the new block to peers
+
+    def broadcast_block(self, block: Block) -> None:
+        for peer in self.peers:
+            peer.receive_block(block)
+#method to broadcast a newly mined block to all connected peers
+
+    def receive_block(self, block: Block) -> None:
+        last = self.blockchain.last_block()
+
+        # Normal case: extends our chain
+        if block.previous_hash == last.hash:
+            self.blockchain.chain.append(block)
+            self.mempool = [
+                tx for tx in self.mempool if tx not in block.transactions
+            ]
+            print(f"{self.name} accepted block {block.index}")
+            return
+
+        # Otherwise: possible fork → sync
+        print(f"{self.name} detected fork, syncing")
+        self.sync_with_peers()
+#method to receive a new block; if it extends the current chain, appends it and removes included transactions from the mempool; if it creates a fork, initiates synchronization with peers
+
     def sync_with_peers(self) -> None:
         for peer in self.peers:
             replaced = self.blockchain.replace_chain_if_better(peer.blockchain.chain)
@@ -321,7 +404,7 @@ class Node:
                 print(f"{self.name} adopted {peer.name}'s chain")
 #peer synchronization method to adopt the longest valid chain from connected peers
 
-#each node has its own blockchain and can connect to other nodes as peers
+
 
 
 #prints the blockchain in a readable format
@@ -370,41 +453,47 @@ def print_chain(bc: Blockchain) -> None:
 # ----------------------------
 
 if __name__ == "__main__":
-    # Create nodes
     node_a = Node("Node A", difficulty=3)
     node_b = Node("Node B", difficulty=3)
 
-    # Connect peers
     node_a.connect_peer(node_b)
     node_b.connect_peer(node_a)
 
-    miner_a = Wallet()
-    miner_b = Wallet()
+    miner = Wallet()
+    alice = Wallet()
+    bob = Wallet()
 
-    # Both nodes mine their first block independently
-    node_a.blockchain.mine_block([], miner_a.address())
-    node_b.blockchain.mine_block([], miner_b.address())
-
-    print("After first mining:")
-    print("Node A chain length:", len(node_a.blockchain.chain))
-    print("Node B chain length:", len(node_b.blockchain.chain))
-
-    # Fork happens here: both chains differ but same length
-
-    # Node A mines another block
-    node_a.blockchain.mine_block([], miner_a.address())
-
-    print("\nNode A mines again:")
-    print("Node A chain length:", len(node_a.blockchain.chain))
-    print("Node B chain length:", len(node_b.blockchain.chain))
-
-    # Sync nodes
-    print("\nSynchronizing...")
+    # 1) Fund miner on Node A, sync Node B
+    node_a.blockchain.mine_block([], miner.address())
     node_b.sync_with_peers()
 
-    print("\nAfter sync:")
-    print("Node A chain length:", len(node_a.blockchain.chain))
-    print("Node B chain length:", len(node_b.blockchain.chain))
+    # 2) Miner -> Alice (broadcast + mine it first)
+    tx1 = Transaction(sender=miner.address(), recipient=alice.address(), amount=20)
+    sign_transaction(tx1, miner)
+    node_a.receive_transaction(tx1)
+
+    # Mine block containing tx1
+    node_a.mine(miner.address())
+
+    # Make sure Node B sees the new block (your broadcast_block should do this,
+    # but syncing is a safe learning-step)
+    node_b.sync_with_peers()
+
+    # 3) Alice -> Bob (now Alice actually has funds on-chain)
+    tx2 = Transaction(sender=alice.address(), recipient=bob.address(), amount=5)
+    sign_transaction(tx2, alice)
+    node_b.receive_transaction(tx2)
+
+    # Mine block containing tx2
+    node_a.mine(miner.address())
+    node_b.sync_with_peers()
+
+    print("\nFinal balances (Node A view):")
+    print("Miner:", node_a.blockchain.get_balance(miner.address()))
+    print("Alice:", node_a.blockchain.get_balance(alice.address()))
+    print("Bob:", node_a.blockchain.get_balance(bob.address()))
+    print("Blockchain valid?", node_a.blockchain.is_valid())
+
 
     
 
