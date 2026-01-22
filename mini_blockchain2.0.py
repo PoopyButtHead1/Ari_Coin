@@ -17,7 +17,22 @@
 #install ecdsa
 #ecdsa is a library for elliptic curve cryptography, used here for creating and verifying digital signatures.
 
-#phase 3: Add mining making it expensive to create blocks through trial and error hashing while cheap to varify 
+#phase 3: Add mining making it expensive to create blocks through trial and error hashing while cheap to varify
+#a nonce is added to the block data and miners repeatedly try different nonce values until they find a hash that meets a certain difficulty target (e.g., starts with a certain number of zeros).
+#This proof-of-work mechanism secures the blockchain by making it computationally expensive to alter past blocks, as changing any block would require re-mining all subsequent blocks.
+#witiout mining anyone could quickly create blocks and add them to the chain, undermining its security and trustworthiness.
+
+#phase 4: multiple nodes, networking, consensus, forks, and attacks
+#What happens when multiple copies of the blockchain exist across many computers (nodes) that communicate over a network?
+#in a decentralized system, blocks will conflict 
+#nodes: computers that maintain a independent copy of the blockchain and validate new blocks and transactions (its own miner, own wallet, own copy of the chain)
+#consensus: nodes agree on the state of the blockchain using consensus algorithms (e.g., Proof of Work, Proof of Stake) The longest valid chain is accepted as the true chain!
+#forks: occur when there are conflicting versions of the blockchain, leading to temporary splits until consensus is reached
+
+#Phase 5: security considerations
+#attacks: various threats to blockchain security, such as 51% attacks, double spending, and Sybil attacks
+#networking: nodes communicate over a peer-to-peer network to share blockchain data and updates
+#---------
 
 import hashlib
 #gives SHA-256 hashing which means it creates a 32 byte fingerprint of the input data with a 256 bit output 
@@ -242,6 +257,26 @@ class Blockchain:
     #validates the integrity of the blockchain
     #add block is no longer necessarey anymore because mining now adds blocks with proof of work and reward transactions
 
+    def chain_work(self) -> int:
+    # Simple version: work = number of blocks (difficulty fixed)
+        return len(self.chain)
+#compares the current chain with another chain and replaces it if the other chain is longer and valid; returns True if the chain was replaced, otherwise False
+    def replace_chain_if_better(self, other_chain: list[Block]) -> bool:
+        if len(other_chain) <= len(self.chain):
+            return False
+
+    # Temporarily swap and validate
+        original_chain = self.chain
+        self.chain = other_chain
+
+        if self.is_valid():
+            return True
+        else:
+            self.chain = original_chain
+            return False
+#validates the integrity of the blockchain
+
+
     def is_valid(self) -> bool:
         for i in range(1, len(self.chain)):
             current = self.chain[i]
@@ -268,11 +303,25 @@ class Blockchain:
 
         return True
     
-
-
-
-
 #iterates through the chain starting from the second block; checks if each block's previous_hash matches the hash of the previous block; recomputes the hash of each block and compares it to the stored hash; returns True if all blocks are valid, otherwise False.
+
+class Node:
+    def __init__(self, name: str, difficulty: int = 4):
+        self.name = name
+        self.blockchain = Blockchain(difficulty=difficulty)
+        self.peers: list["Node"] = []
+#initializes a node with a name, its own blockchain, and an empty list of peers
+    def connect_peer(self, peer: "Node") -> None:
+        self.peers.append(peer)
+#method to connect another node as a peer
+    def sync_with_peers(self) -> None:
+        for peer in self.peers:
+            replaced = self.blockchain.replace_chain_if_better(peer.blockchain.chain)
+            if replaced:
+                print(f"{self.name} adopted {peer.name}'s chain")
+#peer synchronization method to adopt the longest valid chain from connected peers
+
+#each node has its own blockchain and can connect to other nodes as peers
 
 
 #prints the blockchain in a readable format
@@ -289,6 +338,31 @@ def print_chain(bc: Blockchain) -> None:
         printable["transactions"] = cleaned
         print(json.dumps(printable, indent=2))
 
+#prints full blockchain with proper transaction formatting
+def print_chain(bc: Blockchain) -> None:
+    for block in bc.chain:
+        printable = {
+            "index": block.index,
+            "timestamp": block.timestamp,
+            "previous_hash": block.previous_hash,
+            "nonce": block.nonce,
+            "hash": block.hash,
+            "transactions": []
+        }
+
+        for tx in block.transactions:
+            if isinstance(tx, Transaction):
+                printable["transactions"].append({
+                    "sender": tx.sender,
+                    "recipient": tx.recipient,
+                    "amount": tx.amount,
+                    "signature": tx.signature.hex() if tx.signature else None
+                })
+            else:
+                printable["transactions"].append(tx)
+
+        print(json.dumps(printable, indent=2))
+
 
 # ----------------------------
 # Demo
@@ -296,26 +370,41 @@ def print_chain(bc: Blockchain) -> None:
 # ----------------------------
 
 if __name__ == "__main__":
-    bc = Blockchain(difficulty=4, mining_reward=50)
+    # Create nodes
+    node_a = Node("Node A", difficulty=3)
+    node_b = Node("Node B", difficulty=3)
 
-    miner = Wallet()
-    alice = Wallet()
-    bob = Wallet()
+    # Connect peers
+    node_a.connect_peer(node_b)
+    node_b.connect_peer(node_a)
 
-    # Mine first block: gives miner 50
-    bc.mine_block([], miner.address())
+    miner_a = Wallet()
+    miner_b = Wallet()
 
-    # Miner sends Alice 20 (must be signed)
-    tx1 = Transaction(sender=miner.address(), recipient=alice.address(), amount=20)
-    sign_transaction(tx1, miner)
-    bc.mine_block([tx1], miner.address())  # miner also earns +50 again
+    # Both nodes mine their first block independently
+    node_a.blockchain.mine_block([], miner_a.address())
+    node_b.blockchain.mine_block([], miner_b.address())
 
-    # Alice sends Bob 5
-    tx2 = Transaction(sender=alice.address(), recipient=bob.address(), amount=5)
-    sign_transaction(tx2, alice)
-    bc.mine_block([tx2], miner.address())
+    print("After first mining:")
+    print("Node A chain length:", len(node_a.blockchain.chain))
+    print("Node B chain length:", len(node_b.blockchain.chain))
 
-    print("Miner balance:", bc.get_balance(miner.address()))
-    print("Alice balance:", bc.get_balance(alice.address()))
-    print("Bob balance:", bc.get_balance(bob.address()))
-    print("Blockchain valid?", bc.is_valid())
+    # Fork happens here: both chains differ but same length
+
+    # Node A mines another block
+    node_a.blockchain.mine_block([], miner_a.address())
+
+    print("\nNode A mines again:")
+    print("Node A chain length:", len(node_a.blockchain.chain))
+    print("Node B chain length:", len(node_b.blockchain.chain))
+
+    # Sync nodes
+    print("\nSynchronizing...")
+    node_b.sync_with_peers()
+
+    print("\nAfter sync:")
+    print("Node A chain length:", len(node_a.blockchain.chain))
+    print("Node B chain length:", len(node_b.blockchain.chain))
+
+    
+
